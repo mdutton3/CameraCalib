@@ -143,12 +143,12 @@ void GenExtrinsic( Mat1d & rotation, Mat1d & translation, Mat1d & extrinsic )
 
 //---------------------------------------------------------------------------------------
 // Generates a pattern of points in camera space (looking down the Z axis)
-void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result )
+void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result3d )
 {
     enum {
-        I_COUNT = 3, I_MAX = I_COUNT - 1,
-        J_COUNT = 3, J_MAX = J_COUNT - 1,
-        K_COUNT = 2, K_MAX = K_COUNT - 1,
+        I_COUNT = 4, I_MAX = I_COUNT - 1,
+        J_COUNT = 4, J_MAX = J_COUNT - 1,
+        K_COUNT = 4, K_MAX = K_COUNT - 1,
 
         TOTAL_COUNT = I_COUNT * J_COUNT * K_COUNT
     };
@@ -159,8 +159,8 @@ void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result )
     float const slope_v = tan( fov_v / 2 );
     cout << "slope: " << slope_h << ", " << slope_v << endl;
 
-    result.clear();
-    result.reserve( TOTAL_COUNT );
+    result3d.clear();
+    result3d.reserve( TOTAL_COUNT );
 
     for( size_t i = 0; i < I_COUNT; ++i )
     {
@@ -168,13 +168,13 @@ void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result )
         {
             for( size_t k = 0; k < K_COUNT; ++k )
             {
-                // Normalized image point, +/- 1
-                float const u = normalize(i,I_MAX) * 2 - 1;
-                float const v = normalize(j,J_MAX) * 2 - 1;
+                // Normalized image point, (+/- inset)
+                float const u = inset * (normalize(i,I_MAX) * 2 - 1);
+                float const v = inset * (normalize(j,J_MAX) * 2 - 1);
 
                 float const depth = 2.f + 6.f * normalize(k,K_MAX) ;//+ depthRand(randEng);
-                float const y = v * inset * (slope_v * depth); // scale by depth
-                float const x = u * inset * (slope_h * depth); // scale by depth
+                float const y = v * (slope_v * depth); // scale by depth
+                float const x = u * (slope_h * depth); // scale by depth
                 
                 //cout
                 //    << u << ", "
@@ -182,9 +182,45 @@ void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result )
                 //    << x << ", "
                 //    << endl;
 
-                result.push_back( Point3f(x, y, depth) );
+                result3d.push_back( Point3f( x, y, depth ) );
             }
         }
+    }
+}
+
+void CameraToWorldCoord( Mat1d const & extrinsic, std::vector<Point3f> & points )
+{
+    Mat1d invRotation = extrinsic.colRange(0,3).t();
+    Mat1d translation = extrinsic.col(3);
+
+    // Convert camera coord to world coord
+    Mat1d ptMat(3,1);
+    Mat1d worldPtMat(3,1);
+    for( size_t i = 0; i < points.size(); ++i )
+    {
+        auto & pt = points[i];
+        ptMat << pt.x, pt.y, pt.z;
+        worldPtMat = invRotation * (ptMat - translation);
+        pt = Point3f( worldPtMat(0), worldPtMat(1), worldPtMat(2) );
+    }
+}
+
+void ProjectCalibPattern( Mat1d const & projection, std::vector<Point3f> const & points3d, std::vector<Point2f> & points2d )
+{
+    points2d.resize( points3d.size() );
+
+    Mat1d pt3d(3,1);
+    Mat1d pt2dHomo(3,1);
+    for( size_t i = 0; i < points3d.size(); ++i )
+    {
+        pt3d << points3d[i].x, points3d[i].y, points3d[i].z;
+
+        pt2dHomo = (projection.colRange(0,3) * pt3d) + projection.col(3);
+        double w = pt2dHomo(2);
+        points2d[i].x = pt2dHomo(0) / w;
+        points2d[i].y = pt2dHomo(1) / w;
+
+        cout << points2d[i] << endl;
     }
 }
 
@@ -209,8 +245,8 @@ int _tmain(int argc, _TCHAR* argv[])
     SeedRandomEngine();
 
     // Image size
-    float const width = 1.f;
-    float const height = 1.f;
+    float const width = 1280;
+    float const height = 720.f;
 
     float const fov_h = ToRadians( 30.f );
     float const fov_v = ToRadians( 18.f );
@@ -238,17 +274,14 @@ int _tmain(int argc, _TCHAR* argv[])
     cout << "projection matrix:" << endl
          << projection << endl;
 
-    
-    std::normal_distribution<float> imgPtErrDist(0.f, 0.05f); // portion of normalized screen
-    std::normal_distribution<float> depthRand(0.0f, 1.f);
-
-
-    //WaitForEnter();
-
     vector<Point3f> calibPattern3d;
     MakeCalibPattern( fov_h, fov_v, calibPattern3d );
-    
-    enum { TEST_MULT = 6 };
+    CameraToWorldCoord( extrinsic, calibPattern3d );
+
+    vector<Point2f> calibPattern2d;
+    ProjectCalibPattern( projection, calibPattern3d, calibPattern2d );
+
+    enum { TEST_MULT = 1 };
     size_t const TOTAL_COUNT = calibPattern3d.size() * TEST_MULT;
 
     vector< vector<Point3f> > points3d_list(1);
@@ -259,34 +292,42 @@ int _tmain(int argc, _TCHAR* argv[])
     vector<Point2f> & points2d = points2d_list.front();
     points2d.reserve( TOTAL_COUNT );
 
+    Mat img( height, width, CV_8UC3, CV_RGB(0,0,0) );
+
     Mat1d worldPtMat;
-    Mat1d imgPtHomo;
+    Mat1d cameraPt(3,1);
     for( size_t i = 0; i < calibPattern3d.size(); ++i )
     {
         auto const & calibPt3d = calibPattern3d[i];
-        Mat1d const cameraPt = (Mat1d(3,1) << calibPt3d.x, calibPt3d.y, calibPt3d.z);
+        auto const & calibPt2d = calibPattern2d[i];
 
-        //cout << rotationMatrix.t().size() << cameraPt.size() << endl;
-        
-        worldPtMat = invRotation * (cameraPt - translation);
-        imgPtHomo = projection(Rect(0,0,3,3)) * worldPtMat + projection.col(3);
-        
-        Point3f const worldPt( worldPtMat(0), worldPtMat(1), worldPtMat(2) );
-        
-        float const w = imgPtHomo(2);
-        Point2f const imgPt( imgPtHomo(0) / w, imgPtHomo(1) / w );
+        static std::normal_distribution<float> imgPtErrDist(0.f, 20); // portion of normalized screen
+        static std::uniform_real_distribution<double> angleDist( 0.0, 2 * M_PI );
 
+        cv::circle( img, calibPt2d, imgPtErrDist.stddev()*2, CV_RGB(200,0,0), 4 );
+        cv::circle( img, calibPt2d, imgPtErrDist.stddev(), CV_RGB(255,0,0), -1 );
+        
         for( auto j = 0; j < TEST_MULT; ++j )
         {
-            Point2f const imgPtErr( imgPtErrDist(randEng), imgPtErrDist(randEng) );
+            double errDist = imgPtErrDist(randEng);
+            double errAngle = angleDist( randEng );
+            Point2f const imgPtErr( sin(errAngle) * errDist, cos(errAngle) * errDist );
 
-            points3d.push_back( worldPt );
-            points2d.push_back( imgPt + imgPtErr );
+            auto point2d = calibPt2d + imgPtErr;
+
+            points3d.push_back( calibPt3d );
+            points2d.push_back( point2d );
+            cv::circle( img, point2d, 5, CV_RGB(0,255,0), 2 );
         }
 
         //cout << i << ": "
         //    << cameraPt << ',' << points2d.back() << ',' << endl;
     }
+
+    //cv::imwrite( "calibpts.png", img );
+    //cv::imshow( "2d pts", img );
+    //cv::waitKey();
+    //cv::destroyWindow("2d pts");
 
     Mat camMat_est;
     Mat distCoeffs_est;
@@ -299,30 +340,20 @@ int _tmain(int argc, _TCHAR* argv[])
         double rep_err = solvePnP( points3d, points2d, intrinsic, distCoeffs_est, rvecs.front(), tvecs.front() );
         cout << "Done: " << rep_err << ' ' << (rep_err/TOTAL_COUNT) << endl;
 
-        //cout << endl << "Average Reprojection error: " << rep_err << endl;
-        cout << "==================================" << endl;
-        
-        double tErrMag = 0;
-        {
-            Mat1d terr = tvecs.front() - translation;
-            tErrMag = cv::norm( terr );
-            std::for_each( terr.begin(), terr.end(), ReducePrecision() );
-            cout << "Translation diff: " << terr << endl
-                 << " = " << tvecs.front() << " - " << translation << endl << endl;
-        }
+        double tErrMag = cv::norm( tvecs.front() - translation );
 
         Mat1d outRotation(3,3);
         Rodrigues( rvecs.front(), outRotation );
 
-        cout << rvecs.front() << endl << endl;
-        cout << outRotation << endl << endl;
+        //cout << rvecs.front() << endl << endl;
+        //cout << outRotation << endl << endl;
 
         Mat1d rotDelta = (invRotation * outRotation);
         std::for_each( rotDelta.begin(), rotDelta.end(), ReducePrecision() );
         double rotError = RotationError( rotDelta );
-        cout << "Rotation diff:" << endl
-             << rotDelta << endl
-             << endl;
+        //cout << "Rotation diff:" << endl
+        //     << rotDelta << endl
+        //     << endl;
 
         cout << "Rotation Error:   " << ToDegrees( rotError ) << " degrees" << endl
              << "Translation error: " << (tErrMag * 12) << " inches" << endl
@@ -333,15 +364,28 @@ int _tmain(int argc, _TCHAR* argv[])
         {
             Mat projectedPts;
             projectPoints( Mat(points3d), rvecs.front(), tvecs.front(), intrinsic, distCoeffs_est, projectedPts );
-            Mat temp(points2d);
-            double err = norm( temp, projectedPts, CV_L2);              // difference
+            double sumSq = 0;
+            for( size_t i = 0; i < projectedPts.rows; ++i )
+            {
+                size_t iTruth = i / TEST_MULT;
+                Point2f const p = projectedPts.at<Point2f>(i);
+                sumSq += cv::norm( p - calibPattern2d[iTruth] );
+            }
+
+            double err = cv::sqrt( sumSq );
 
             //Mat diff = temp - projectedPts;
             //Mat mag;
             //cv::magnitude( diff.col(0), diff.col(1), mag );
 
             int n = (int)points3d.size();
-            cout << "Reprojection Error: " << err << " / " << n << " = " << (err/n) << " => " << (1280*err/n) << " pixels" << endl;
+            cout << "Reprojection Error: " << err << " / " << n << " = " << (err/n) << " pixels" << endl;
+
+            for( auto i = 0; i < projectedPts.rows; ++i )
+            {
+                Point2d p( projectedPts.at<Point2f>(i) );
+                cv::circle( img, p, 5, CV_RGB(0,0,255), 2 );
+            }
         }
     }
     catch(cv::Exception const & e )
@@ -349,7 +393,9 @@ int _tmain(int argc, _TCHAR* argv[])
         cerr << e.what() << endl;
     }
 
-    WaitForEnter();
+    cv::imwrite( "final.png", img );
+    cv::imshow( "2d pts", img );
+    cv::waitKey();
 
 	return 0;
 }
