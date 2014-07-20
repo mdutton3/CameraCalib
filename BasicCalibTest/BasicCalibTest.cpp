@@ -6,6 +6,7 @@
 #include <opencv2\calib3d\calib3d.hpp>
 
 #include <random>
+#include <fstream>
 
 using namespace std;
 using namespace cv;
@@ -267,8 +268,9 @@ void GenTestPoints( std::vector<Point3f> const & truth3d, std::vector<Point2f> c
         auto const & calibPt3d = truth3d[i];
         auto const & calibPt2d = truth2d[i];
 
-        //cv::circle( s_img, calibPt2d, imgPtErrStdDev*2, CV_RGB(240,0,0), 3 );
-        //cv::circle( s_img, calibPt2d, imgPtErrStdDev  , CV_RGB(255,0,0), -1 );
+        //cv::circle( s_img, calibPt2d, imgPtErrStdDev*2, CV_RGB(240,0,0), 1 );
+        //cv::circle( s_img, calibPt2d, imgPtErrStdDev  , CV_RGB(255,0,0), 1 );
+        //cv::circle( s_img, calibPt2d, 1  , CV_RGB(255,0,0), 1 );
         
         double errDist = imgPtErrDist(randEng);
         double errAngle = angleDist( randEng );
@@ -279,7 +281,7 @@ void GenTestPoints( std::vector<Point3f> const & truth3d, std::vector<Point2f> c
         test3d.push_back( calibPt3d );
         test2d.push_back( point2d );
         
-        //cv::circle( s_img, point2d, 5, CV_RGB(0,255,0), 2 );
+        //cv::circle( s_img, point2d, 5, CV_RGB(0,255,0), 1 );
     }
 }
 
@@ -288,28 +290,46 @@ void Eval( Mat1d const & intrinsic, Mat1d const & extrinsic,
            std::vector<Point3f> & test3d, std::vector<Point2f> & test2d,
            double & rotError, double & transError, double & projError )
 {
-        Mat camMat_est;
     Mat distCoeffs_est;
     vector<Mat> rvecs(1), tvecs(1);
 
     try
     {
         //cout << endl << "Calibrating...";
-        //double rep_err = calibrateCamera(points3d_list, points2d_list, cv::Size2f(width,height), camMat_est, distCoeffs_est, rvecs, tvecs, CV_CALIB_USE_INTRINSIC_GUESS );
-        solvePnP( test3d, test2d, intrinsic, distCoeffs_est, rvecs.front(), tvecs.front() );
-        
+
+        bool const bFullCalib = true;
+        if( bFullCalib )
+        {
+            Mat camMat_est = intrinsic.clone();
+            vector<vector<Point3f>> test3d_list( 1, test3d );
+            vector<vector<Point2f>> test2d_list( 1, test2d );
+
+            double rep_err = calibrateCamera(test3d_list, test2d_list, cv::Size2f(width,height),
+                camMat_est, distCoeffs_est, rvecs, tvecs,
+                CV_CALIB_USE_INTRINSIC_GUESS | CV_CALIB_ZERO_TANGENT_DIST |
+                CV_CALIB_FIX_K2 | CV_CALIB_FIX_K3 | CV_CALIB_FIX_K4 | CV_CALIB_FIX_K5 | CV_CALIB_FIX_K6 );
+            //cout << "rep_err: " << rep_err << endl;
+            //cout << "camMat_est: " << endl << camMat_est << endl;
+            //cout << "distCoeffs_est: " << distCoeffs_est << endl;
+            //cout << endl;
+        }
+        else
+        {
+            solvePnP( test3d, test2d, intrinsic, distCoeffs_est, rvecs.front(), tvecs.front() );
+        }        
+
         Mat1d const translation = extrinsic.col(3);
         transError = cv::norm( tvecs.front() - translation );
 
         Mat1d outRotation(3,3);
         Rodrigues( rvecs.front(), outRotation );
 
-        //cout << rvecs.front() << endl << endl;
-        //cout << outRotation << endl << endl;
-
         Mat1d rotDelta = (extrinsic.colRange(0,3).t() * outRotation);
         rotError = RotationError( rotDelta );
-        
+
+        //cout << rvecs.front() << endl << endl;
+        //cout << outRotation << endl << endl;        
+
         //std::for_each( rotDelta.begin(), rotDelta.end(), ReducePrecision() );
         //cout << "Rotation diff:" << endl
         //     << rotDelta << endl
@@ -317,8 +337,6 @@ void Eval( Mat1d const & intrinsic, Mat1d const & extrinsic,
 
         //cout << "Rotation Error:   " << ToDegrees( rotError ) << " degrees" << endl
         //     << "Translation error: " << (transError * 12) << " inches" << endl;
-
-        //cout << camMat_est << endl << endl;
 
         {
             Mat projectedPts;
@@ -330,11 +348,11 @@ void Eval( Mat1d const & intrinsic, Mat1d const & extrinsic,
             projError = (err/n);
             //cout << "Reprojection Error: " << err << " / " << n << " = " << projError << " pixels" << endl;
 
-            for( auto i = 0; i < projectedPts.rows; ++i )
-            {
-                Point2d p( projectedPts.at<Point2f>(i) );
-                //cv::circle( s_img, p, 5, CV_RGB(0,0,255), 2 );
-            }
+            //for( auto i = 0; i < projectedPts.rows; ++i )
+            //{
+            //    Point2d p( projectedPts.at<Point2f>(i) );
+            //    cv::circle( s_img, p, 5, CV_RGB(0,0,255), 1 );
+            //}
         }
     }
     catch(cv::Exception const & e )
@@ -346,7 +364,7 @@ void Eval( Mat1d const & intrinsic, Mat1d const & extrinsic,
 }
 
 //---------------------------------------------------------------------------------------
-void GetStats( double const * data, size_t count, double & min, double & max, double &mean, double &var )
+void GetStats( double const * data, size_t count, double & min, double & max, double &mean, double &var, double&bound )
 {
     std::vector<double> temp( data, data + count );
 
@@ -374,6 +392,9 @@ void GetStats( double const * data, size_t count, double & min, double & max, do
         var = varAccum / (count - 1);
     else
         var = 0;
+
+    double stddev = sqrt( var );
+    bound = mean + (2 * stddev);
 }
 
 //---------------------------------------------------------------------------------------
@@ -410,12 +431,24 @@ int _tmain(int argc, _TCHAR* argv[])
     vector<Point3f> test3d;
     vector<Point2f> test2d;
 
-    for( int i = 2; i <= 8; ++i )
-    for( int j = 2; j <= 8; ++j )
-    for( int k = 1; k <= 8; ++k )
-    for( int SAMPLE_COUNT = 1; SAMPLE_COUNT <= 4; ++SAMPLE_COUNT )
+    std::ofstream cycleLog( "cycle.log.csv" );
+    std::ofstream batchLog( "batch.log.csv" );
     {
-        enum { NUM_ITER = 100 };
+        cycleLog << "i, j, k, nSample, errStdDev, nPt, xx, errRot, errTrans, errProj" << endl;
+        batchLog << "i, j, k, nSample, errStdDev, nPt, xx"
+            << ", _errRot_, errRot_min, errRot_max, errRot_mean, errRot_var, errRot_bound"
+            << ", _errTrans_, errTrans_min, errTrans_max, errTrans_mean, errTrans_var, errTrans_bound"
+            << ", _errProj_, errProj_min, errProj_max, errProj_mean, errProj_var, errProj_bound"
+            << endl;
+    }
+
+    for( int i = 2; i <= 10; ++i )
+    for( int j = 2; j <= 10; ++j )
+    for( int k = 1; k <= 10; ++k )
+    for( int SAMPLE_COUNT = 1; SAMPLE_COUNT <= 20; ++SAMPLE_COUNT )
+    for( int errStdDevPixel = 1; errStdDevPixel <= 25; ++errStdDevPixel )
+    {
+        enum { NUM_ITER = 200 };
         double rotError[NUM_ITER], transError[NUM_ITER], projError[NUM_ITER];
         for( int ITER = 0; ITER < NUM_ITER; ++ITER )
         {
@@ -432,11 +465,11 @@ int _tmain(int argc, _TCHAR* argv[])
 
             for( int iMult = 0; iMult < SAMPLE_COUNT; ++iMult )
             {
-                GenTestPoints( calibPattern3d, calibPattern2d, 20, test3d, test2d );
+                GenTestPoints( calibPattern3d, calibPattern2d, errStdDevPixel, test3d, test2d );
             }
 
-            //cv::imwrite( "calibpts.png", img );
-            //cv::imshow( "2d pts", img );
+            //cv::imwrite( "calibpts.png", s_img );
+            //cv::imshow( "2d pts", s_img );
             //cv::waitKey();
             //cv::destroyWindow("2d pts");
 
@@ -446,11 +479,12 @@ int _tmain(int argc, _TCHAR* argv[])
                 test3d, test2d,
                 rotError[ITER], transError[ITER], projError[ITER] );
 
-            cout << "Cycle" << ", "
+            cycleLog
                 << i << ", "
                 << j << ", "
                 << k << ", "
                 << SAMPLE_COUNT << ", "
+                << errStdDevPixel << ", "
                 << test3d.size() << ", "
                 << "Data" << ", "
                 << rotError[ITER] << ", "
@@ -459,38 +493,53 @@ int _tmain(int argc, _TCHAR* argv[])
             //cv::imwrite( "final.png", s_img );
             //cv::imshow( "2d pts", s_img );
             //cv::waitKey();
+            //cv::destroyWindow("2d pts");
         }
 
-        
-        cout << "Batch" << ", "
+        cout
             << i << ", "
             << j << ", "
             << k << ", "
             << SAMPLE_COUNT << ", "
+            << errStdDevPixel << ", "
+            << test3d.size() << ", "
+            << "Done" << std::endl;
+
+        batchLog
+            << i << ", "
+            << j << ", "
+            << k << ", "
+            << SAMPLE_COUNT << ", "
+            << errStdDevPixel << ", "
             << test3d.size() << ", "
             << "Data" << ", ";
 
-        double minVal, maxVal, meanVal, var;
-        GetStats( rotError, NUM_ITER, minVal, maxVal, meanVal, var );
-        cout << "rotError" << ","
+        double minVal, maxVal, meanVal, var, bound;
+        GetStats( rotError, NUM_ITER, minVal, maxVal, meanVal, var, bound );
+        batchLog << "rotError" << ","
             << minVal << ","
             << maxVal << ","
             << meanVal << ","
-            << var << ",";
+            << var << ","
+            << bound << ",";
 
-        GetStats( transError, NUM_ITER, minVal, maxVal, meanVal, var );
-        cout << "transError" << ","
+        GetStats( transError, NUM_ITER, minVal, maxVal, meanVal, var,bound );
+        batchLog << "transError" << ","
             << minVal << ","
             << maxVal << ","
             << meanVal << ","
-            << var << ",";
+            << var << ","
+            << bound << ",";
 
-        GetStats( projError, NUM_ITER, minVal, maxVal, meanVal, var );
-        cout << "projError" << ","
+        GetStats( projError, NUM_ITER, minVal, maxVal, meanVal, var, bound );
+        batchLog << "projError" << ","
             << minVal << ","
             << maxVal << ","
             << meanVal << ","
-            << var << endl;
+            << var << ","
+            << bound << ",";
+
+        batchLog << endl;
     }
 
 	return 0;
