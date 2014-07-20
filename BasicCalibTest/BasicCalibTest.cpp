@@ -97,6 +97,20 @@ struct ReducePrecision
 // Random number generator
 std::mt19937_64 randEng;
 
+// Image size
+float const width = 1280;
+float const height = 720.f;
+
+float const fov_h = ToRadians( 30.f );
+float const fov_v = ToRadians( 18.f );
+
+//Mat s_img( height, width, CV_8UC3, CV_RGB(0,0,0) );
+void ClearImage()
+{
+    //s_img = CV_RGB(0,0,0);
+}
+
+//---------------------------------------------------------------------------------------
 void SeedRandomEngine()
 {
     union
@@ -143,30 +157,27 @@ void GenExtrinsic( Mat1d & rotation, Mat1d & translation, Mat1d & extrinsic )
 
 //---------------------------------------------------------------------------------------
 // Generates a pattern of points in camera space (looking down the Z axis)
-void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result3d )
+void MakeCalibPattern( int I_COUNT, int J_COUNT, int K_COUNT, float fov_h, float fov_v, std::vector<Point3f> & result3d )
 {
-    enum {
-        I_COUNT = 4, I_MAX = I_COUNT - 1,
-        J_COUNT = 4, J_MAX = J_COUNT - 1,
-        K_COUNT = 4, K_MAX = K_COUNT - 1,
-
-        TOTAL_COUNT = I_COUNT * J_COUNT * K_COUNT
-    };
+    auto const I_MAX = I_COUNT - 1;
+    auto const J_MAX = J_COUNT - 1;
+    auto const K_MAX = K_COUNT - 1;
+    auto const TOTAL_COUNT = I_COUNT * J_COUNT * K_COUNT;
     
-    float const inset = 0.8;
+    float const inset = 0.8f;
 
     float const slope_h = tan( fov_h / 2 );
     float const slope_v = tan( fov_v / 2 );
-    cout << "slope: " << slope_h << ", " << slope_v << endl;
+    //cout << "slope: " << slope_h << ", " << slope_v << endl;
 
     result3d.clear();
     result3d.reserve( TOTAL_COUNT );
 
-    for( size_t i = 0; i < I_COUNT; ++i )
+    for( int i = 0; i < I_COUNT; ++i )
     {
-        for( size_t j = 0; j < J_COUNT; ++j )
+        for( int j = 0; j < J_COUNT; ++j )
         {
-            for( size_t k = 0; k < K_COUNT; ++k )
+            for( int k = 0; k < K_COUNT; ++k )
             {
                 // Normalized image point, (+/- inset)
                 float const u = inset * (normalize(i,I_MAX) * 2 - 1);
@@ -188,6 +199,7 @@ void MakeCalibPattern( float fov_h, float fov_v, std::vector<Point3f> & result3d
     }
 }
 
+//---------------------------------------------------------------------------------------
 void CameraToWorldCoord( Mat1d const & extrinsic, std::vector<Point3f> & points )
 {
     Mat1d invRotation = extrinsic.colRange(0,3).t();
@@ -205,6 +217,7 @@ void CameraToWorldCoord( Mat1d const & extrinsic, std::vector<Point3f> & points 
     }
 }
 
+//---------------------------------------------------------------------------------------
 void ProjectCalibPattern( Mat1d const & projection, std::vector<Point3f> const & points3d, std::vector<Point2f> & points2d )
 {
     points2d.resize( points3d.size() );
@@ -219,11 +232,10 @@ void ProjectCalibPattern( Mat1d const & projection, std::vector<Point3f> const &
         double w = pt2dHomo(2);
         points2d[i].x = pt2dHomo(0) / w;
         points2d[i].y = pt2dHomo(1) / w;
-
-        cout << points2d[i] << endl;
     }
 }
 
+//---------------------------------------------------------------------------------------
 double RotationError( Mat1d const & r )
 {
     //http://stackoverflow.com/questions/6522108/error-between-two-rotations
@@ -239,17 +251,136 @@ double RotationError( Mat1d const & r )
 }
 
 //---------------------------------------------------------------------------------------
+void GenTestPoints( std::vector<Point3f> const & truth3d, std::vector<Point2f> const & truth2d,
+                    double imgPtErrStdDev,
+                    std::vector<Point3f> & test3d, std::vector<Point2f> & test2d )
+{
+    size_t const count = truth3d.size();
+    test2d.reserve( test2d.size() + count );
+    test3d.reserve( test3d.size() + count );
+
+    std::normal_distribution<float> imgPtErrDist(0.f, imgPtErrStdDev); // portion of normalized screen
+    std::uniform_real_distribution<double> angleDist( 0.0, 2 * M_PI );
+
+    for( size_t i = 0; i < count; ++i )
+    {
+        auto const & calibPt3d = truth3d[i];
+        auto const & calibPt2d = truth2d[i];
+
+        //cv::circle( s_img, calibPt2d, imgPtErrStdDev*2, CV_RGB(240,0,0), 3 );
+        //cv::circle( s_img, calibPt2d, imgPtErrStdDev  , CV_RGB(255,0,0), -1 );
+        
+        double errDist = imgPtErrDist(randEng);
+        double errAngle = angleDist( randEng );
+        Point2f const imgPtErr( sin(errAngle) * errDist, cos(errAngle) * errDist );
+
+        auto point2d = calibPt2d + imgPtErr;
+
+        test3d.push_back( calibPt3d );
+        test2d.push_back( point2d );
+        
+        //cv::circle( s_img, point2d, 5, CV_RGB(0,255,0), 2 );
+    }
+}
+
+void Eval( Mat1d const & intrinsic, Mat1d const & extrinsic,
+           std::vector<Point3f> const & truth3d, std::vector<Point2f> const & truth2d,
+           std::vector<Point3f> & test3d, std::vector<Point2f> & test2d,
+           double & rotError, double & transError, double & projError )
+{
+        Mat camMat_est;
+    Mat distCoeffs_est;
+    vector<Mat> rvecs(1), tvecs(1);
+
+    try
+    {
+        //cout << endl << "Calibrating...";
+        //double rep_err = calibrateCamera(points3d_list, points2d_list, cv::Size2f(width,height), camMat_est, distCoeffs_est, rvecs, tvecs, CV_CALIB_USE_INTRINSIC_GUESS );
+        solvePnP( test3d, test2d, intrinsic, distCoeffs_est, rvecs.front(), tvecs.front() );
+        
+        Mat1d const translation = extrinsic.col(3);
+        transError = cv::norm( tvecs.front() - translation );
+
+        Mat1d outRotation(3,3);
+        Rodrigues( rvecs.front(), outRotation );
+
+        //cout << rvecs.front() << endl << endl;
+        //cout << outRotation << endl << endl;
+
+        Mat1d rotDelta = (extrinsic.colRange(0,3).t() * outRotation);
+        rotError = RotationError( rotDelta );
+        
+        //std::for_each( rotDelta.begin(), rotDelta.end(), ReducePrecision() );
+        //cout << "Rotation diff:" << endl
+        //     << rotDelta << endl
+        //     << endl;
+
+        //cout << "Rotation Error:   " << ToDegrees( rotError ) << " degrees" << endl
+        //     << "Translation error: " << (transError * 12) << " inches" << endl;
+
+        //cout << camMat_est << endl << endl;
+
+        {
+            Mat projectedPts;
+            projectPoints( Mat(truth3d), rvecs.front(), tvecs.front(), intrinsic, distCoeffs_est, projectedPts );
+            
+            double err = cv::norm( projectedPts, Mat(truth2d), CV_L2 );
+
+            int n = (int)truth3d.size();
+            projError = (err/n);
+            //cout << "Reprojection Error: " << err << " / " << n << " = " << projError << " pixels" << endl;
+
+            for( auto i = 0; i < projectedPts.rows; ++i )
+            {
+                Point2d p( projectedPts.at<Point2f>(i) );
+                //cv::circle( s_img, p, 5, CV_RGB(0,0,255), 2 );
+            }
+        }
+    }
+    catch(cv::Exception const & e )
+    {
+        cerr << e.what() << endl;
+    }
+
+    //cout << endl;
+}
+
+//---------------------------------------------------------------------------------------
+void GetStats( double const * data, size_t count, double & min, double & max, double &mean, double &var )
+{
+    std::vector<double> temp( data, data + count );
+
+    min = max = data[0];
+    
+    std::sort( temp.begin(), temp.end(), std::less<double>() ); // sort for numeric stability
+    double total = 0;
+    for( size_t i = 0; i < count; ++i )
+        total += temp[i];
+
+    mean = total / count;
+
+    double varAccum = 0;
+    for( size_t i = 0; i < count; ++i )
+    {
+        temp[i] -= mean;
+        temp[i] = pow(temp[i],2);
+    }
+
+    std::sort( temp.begin(), temp.end(), std::less<double>() ); // sort for numeric stability
+    for( size_t i = 0; i < count; ++i )
+        varAccum += temp[i];
+
+    if( count > 1 )
+        var = varAccum / (count - 1);
+    else
+        var = 0;
+}
+
+//---------------------------------------------------------------------------------------
 
 int _tmain(int argc, _TCHAR* argv[])
 {
     SeedRandomEngine();
-
-    // Image size
-    float const width = 1280;
-    float const height = 720.f;
-
-    float const fov_h = ToRadians( 30.f );
-    float const fov_v = ToRadians( 18.f );
 
     Mat1d intrinsic;
     GenIntrinsic( width, height, fov_h, fov_v, intrinsic );
@@ -275,127 +406,92 @@ int _tmain(int argc, _TCHAR* argv[])
          << projection << endl;
 
     vector<Point3f> calibPattern3d;
-    MakeCalibPattern( fov_h, fov_v, calibPattern3d );
-    CameraToWorldCoord( extrinsic, calibPattern3d );
-
     vector<Point2f> calibPattern2d;
-    ProjectCalibPattern( projection, calibPattern3d, calibPattern2d );
+    vector<Point3f> test3d;
+    vector<Point2f> test2d;
 
-    enum { TEST_MULT = 1 };
-    size_t const TOTAL_COUNT = calibPattern3d.size() * TEST_MULT;
-
-    vector< vector<Point3f> > points3d_list(1);
-    vector<Point3f> & points3d = points3d_list.front();
-    points3d.reserve( TOTAL_COUNT );
-
-    vector< vector<Point2f> > points2d_list(1);
-    vector<Point2f> & points2d = points2d_list.front();
-    points2d.reserve( TOTAL_COUNT );
-
-    Mat img( height, width, CV_8UC3, CV_RGB(0,0,0) );
-
-    Mat1d worldPtMat;
-    Mat1d cameraPt(3,1);
-    for( size_t i = 0; i < calibPattern3d.size(); ++i )
+    for( int i = 2; i <= 8; ++i )
+    for( int j = 2; j <= 8; ++j )
+    for( int k = 1; k <= 8; ++k )
+    for( int SAMPLE_COUNT = 1; SAMPLE_COUNT <= 4; ++SAMPLE_COUNT )
     {
-        auto const & calibPt3d = calibPattern3d[i];
-        auto const & calibPt2d = calibPattern2d[i];
+        enum { NUM_ITER = 100 };
+        double rotError[NUM_ITER], transError[NUM_ITER], projError[NUM_ITER];
+        for( int ITER = 0; ITER < NUM_ITER; ++ITER )
+        {
+            ClearImage();
+            calibPattern3d.clear();
+            calibPattern2d.clear();
+            test3d.clear();
+            test2d.clear();
+    
+            MakeCalibPattern( i,j,k, fov_h, fov_v, calibPattern3d );
+            CameraToWorldCoord( extrinsic, calibPattern3d );
 
-        static std::normal_distribution<float> imgPtErrDist(0.f, 20); // portion of normalized screen
-        static std::uniform_real_distribution<double> angleDist( 0.0, 2 * M_PI );
+            ProjectCalibPattern( projection, calibPattern3d, calibPattern2d );
 
-        cv::circle( img, calibPt2d, imgPtErrDist.stddev()*2, CV_RGB(200,0,0), 4 );
-        cv::circle( img, calibPt2d, imgPtErrDist.stddev(), CV_RGB(255,0,0), -1 );
+            for( int iMult = 0; iMult < SAMPLE_COUNT; ++iMult )
+            {
+                GenTestPoints( calibPattern3d, calibPattern2d, 20, test3d, test2d );
+            }
+
+            //cv::imwrite( "calibpts.png", img );
+            //cv::imshow( "2d pts", img );
+            //cv::waitKey();
+            //cv::destroyWindow("2d pts");
+
+            
+            Eval( intrinsic, extrinsic,
+                calibPattern3d, calibPattern2d,
+                test3d, test2d,
+                rotError[ITER], transError[ITER], projError[ITER] );
+
+            cout << "Cycle" << ", "
+                << i << ", "
+                << j << ", "
+                << k << ", "
+                << SAMPLE_COUNT << ", "
+                << test3d.size() << ", "
+                << "Data" << ", "
+                << rotError[ITER] << ", "
+                << transError[ITER] << ", "
+                << projError[ITER] << endl;
+            //cv::imwrite( "final.png", s_img );
+            //cv::imshow( "2d pts", s_img );
+            //cv::waitKey();
+        }
+
         
-        for( auto j = 0; j < TEST_MULT; ++j )
-        {
-            double errDist = imgPtErrDist(randEng);
-            double errAngle = angleDist( randEng );
-            Point2f const imgPtErr( sin(errAngle) * errDist, cos(errAngle) * errDist );
+        cout << "Batch" << ", "
+            << i << ", "
+            << j << ", "
+            << k << ", "
+            << SAMPLE_COUNT << ", "
+            << test3d.size() << ", "
+            << "Data" << ", ";
 
-            auto point2d = calibPt2d + imgPtErr;
+        double minVal, maxVal, meanVal, var;
+        GetStats( rotError, NUM_ITER, minVal, maxVal, meanVal, var );
+        cout << "rotError" << ","
+            << minVal << ","
+            << maxVal << ","
+            << meanVal << ","
+            << var << ",";
 
-            points3d.push_back( calibPt3d );
-            points2d.push_back( point2d );
-            cv::circle( img, point2d, 5, CV_RGB(0,255,0), 2 );
-        }
+        GetStats( transError, NUM_ITER, minVal, maxVal, meanVal, var );
+        cout << "transError" << ","
+            << minVal << ","
+            << maxVal << ","
+            << meanVal << ","
+            << var << ",";
 
-        //cout << i << ": "
-        //    << cameraPt << ',' << points2d.back() << ',' << endl;
+        GetStats( projError, NUM_ITER, minVal, maxVal, meanVal, var );
+        cout << "projError" << ","
+            << minVal << ","
+            << maxVal << ","
+            << meanVal << ","
+            << var << endl;
     }
-
-    //cv::imwrite( "calibpts.png", img );
-    //cv::imshow( "2d pts", img );
-    //cv::waitKey();
-    //cv::destroyWindow("2d pts");
-
-    Mat camMat_est;
-    Mat distCoeffs_est;
-    vector<Mat> rvecs(1), tvecs(1);
-
-    try
-    {
-        cout << endl << "Calibrating...";
-        //double rep_err = calibrateCamera(points3d_list, points2d_list, cv::Size2f(width,height), camMat_est, distCoeffs_est, rvecs, tvecs, CV_CALIB_USE_INTRINSIC_GUESS );
-        double rep_err = solvePnP( points3d, points2d, intrinsic, distCoeffs_est, rvecs.front(), tvecs.front() );
-        cout << "Done: " << rep_err << ' ' << (rep_err/TOTAL_COUNT) << endl;
-
-        double tErrMag = cv::norm( tvecs.front() - translation );
-
-        Mat1d outRotation(3,3);
-        Rodrigues( rvecs.front(), outRotation );
-
-        //cout << rvecs.front() << endl << endl;
-        //cout << outRotation << endl << endl;
-
-        Mat1d rotDelta = (invRotation * outRotation);
-        std::for_each( rotDelta.begin(), rotDelta.end(), ReducePrecision() );
-        double rotError = RotationError( rotDelta );
-        //cout << "Rotation diff:" << endl
-        //     << rotDelta << endl
-        //     << endl;
-
-        cout << "Rotation Error:   " << ToDegrees( rotError ) << " degrees" << endl
-             << "Translation error: " << (tErrMag * 12) << " inches" << endl
-             << endl;
-
-        cout << camMat_est << endl << endl;
-
-        {
-            Mat projectedPts;
-            projectPoints( Mat(points3d), rvecs.front(), tvecs.front(), intrinsic, distCoeffs_est, projectedPts );
-            double sumSq = 0;
-            for( size_t i = 0; i < projectedPts.rows; ++i )
-            {
-                size_t iTruth = i / TEST_MULT;
-                Point2f const p = projectedPts.at<Point2f>(i);
-                sumSq += cv::norm( p - calibPattern2d[iTruth] );
-            }
-
-            double err = cv::sqrt( sumSq );
-
-            //Mat diff = temp - projectedPts;
-            //Mat mag;
-            //cv::magnitude( diff.col(0), diff.col(1), mag );
-
-            int n = (int)points3d.size();
-            cout << "Reprojection Error: " << err << " / " << n << " = " << (err/n) << " pixels" << endl;
-
-            for( auto i = 0; i < projectedPts.rows; ++i )
-            {
-                Point2d p( projectedPts.at<Point2f>(i) );
-                cv::circle( img, p, 5, CV_RGB(0,0,255), 2 );
-            }
-        }
-    }
-    catch(cv::Exception const & e )
-    {
-        cerr << e.what() << endl;
-    }
-
-    cv::imwrite( "final.png", img );
-    cv::imshow( "2d pts", img );
-    cv::waitKey();
 
 	return 0;
 }
