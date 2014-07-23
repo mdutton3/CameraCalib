@@ -6,6 +6,19 @@
 #include <opencv2\calib3d\calib3d.hpp>
 #include <vector>
 
+//! @brief Wraps OpenCV camera calibration of 2D-3D points correspondences
+//! @param pts3d An array of 3D points. Each point pairs with a point in pts2d, by index.
+//! @param pts2d An array of 2D points. Each point pairs with a point in pts3d, by index.
+//! @param ptCount The number of points in pts3d (and pts2d)
+//! @param imgWidth The width of the 2D image in pixels
+//! @param imgHeight The height of the 2D image in pixels
+//! @param intrinsicMatInOut In/Out parameter for the Intrinsic Camera matrix (len 9 array, 3x3, row-major)
+//! @param rotationOut Out parameter for the Camera rotation matrix (len 9 array, 3x3, row-major)
+//! @param translationOut Out parameter for the Camera translation vector matrix (len 3)
+//! @returns The reprojection error in pixels
+//! @note The Extrinsic Camera matrix is made by composing the rotation matrix (3x3) and the translation vector (len 3)
+//!     into a 3x4 matrix. The Camera Projection matrix is then:
+//!     projection = intrinsic * extrinsic;
 __declspec(dllexport)
 double CalibCameraWrapper(
     cv::Point3f const * pts3d, cv::Point2f const * pts2d, unsigned int ptCount,
