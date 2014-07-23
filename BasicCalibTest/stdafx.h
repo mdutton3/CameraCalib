@@ -6,6 +6,7 @@
 #pragma once
 
 #define _USE_MATH_DEFINES
+#define WIN32_LEAN_AND_MEAN
 
 #include "targetver.h"
 

@@ -8,6 +8,15 @@
 #include <random>
 #include <fstream>
 
+#include <boost/thread.hpp>
+#include <boost/thread/mutex.hpp>
+#include <boost/thread/lock_guard.hpp>
+
+#include <boost/asio.hpp>
+#include <boost/asio/io_service.hpp>
+
+#include <boost/bind.hpp>
+
 using namespace std;
 using namespace cv;
 
@@ -320,12 +329,14 @@ void Eval( Mat1d const & intrinsic, Mat1d const & extrinsic,
 
         Mat1d const translation = extrinsic.col(3);
         transError = cv::norm( tvecs.front() - translation );
+        transError *= 12;
 
         Mat1d outRotation(3,3);
         Rodrigues( rvecs.front(), outRotation );
 
         Mat1d rotDelta = (extrinsic.colRange(0,3).t() * outRotation);
         rotError = RotationError( rotDelta );
+        rotError = ToDegrees( rotError );
 
         //cout << rvecs.front() << endl << endl;
         //cout << outRotation << endl << endl;        
@@ -398,6 +409,125 @@ void GetStats( double const * data, size_t count, double & min, double & max, do
 }
 
 //---------------------------------------------------------------------------------------
+boost::mutex s_logMutex;
+//std::ofstream cycleLog;
+std::ofstream batchLog;
+
+void DoBatch( Mat1d const & intrinsic_, Mat1d const &extrinsic_, Mat1d const & projection_, int const i, int const j, int const k )
+{
+    Mat1d const intrinsic( intrinsic_.clone() );
+    Mat1d const extrinsic( extrinsic_.clone() );
+    Mat1d const projection( projection_.clone() );
+
+    vector<Point3f> calibPattern3d_;
+    vector<Point2f> calibPattern2d_;
+    vector<Point3f> test3d;
+    vector<Point2f> test2d;
+
+    MakeCalibPattern( i,j,k, fov_h, fov_v, calibPattern3d_ );
+    CameraToWorldCoord( extrinsic, calibPattern3d_ );
+    
+    ProjectCalibPattern( projection, calibPattern3d_, calibPattern2d_ );
+
+    vector<Point3f> const & calibPattern3d( calibPattern3d_ );
+    vector<Point2f> const & calibPattern2d( calibPattern2d_ );
+
+    for( int SAMPLE_COUNT = 1; SAMPLE_COUNT <= 20; ++SAMPLE_COUNT )
+    for( int errStdDevPixel = 1; errStdDevPixel <= 25; errStdDevPixel += 2 )
+    {
+        size_t const count = i * j * k * SAMPLE_COUNT;
+        if( count > 300 )
+            continue;
+
+        enum { NUM_ITER = 200 };
+        double rotError[NUM_ITER], transError[NUM_ITER], projError[NUM_ITER];
+        for( int ITER = 0; ITER < NUM_ITER; ++ITER )
+        {
+            ClearImage();
+            test3d.clear();
+            test2d.clear();
+    
+            for( int iMult = 0; iMult < SAMPLE_COUNT; ++iMult )
+            {
+                GenTestPoints( calibPattern3d, calibPattern2d, errStdDevPixel, test3d, test2d );
+            }
+
+            //cv::imwrite( "calibpts.png", s_img );
+            //cv::imshow( "2d pts", s_img );
+            //cv::waitKey();
+            //cv::destroyWindow("2d pts");
+
+            Eval( intrinsic, extrinsic,
+                calibPattern3d, calibPattern2d,
+                test3d, test2d,
+                rotError[ITER], transError[ITER], projError[ITER] );
+
+            //cycleLog
+            //    << i << ", "
+            //    << j << ", "
+            //    << k << ", "
+            //    << SAMPLE_COUNT << ", "
+            //    << errStdDevPixel << ", "
+            //    << test3d.size() << ", "
+            //    << "Data" << ", "
+            //    << rotError[ITER] << ", "
+            //    << transError[ITER] << ", "
+            //    << projError[ITER] << endl;
+            //cv::imwrite( "final.png", s_img );
+            //cv::imshow( "2d pts", s_img );
+            //cv::waitKey();
+            //cv::destroyWindow("2d pts");
+        }
+
+        {
+            boost::lock_guard<boost::mutex> lockGuard( s_logMutex );
+            cout
+                << i << ", "
+                << j << ", "
+                << k << ", "
+                << SAMPLE_COUNT << ", "
+                << errStdDevPixel << ", "
+                << test3d.size() << ", "
+                << "Done" << std::endl;
+
+            batchLog
+                << i << ", "
+                << j << ", "
+                << k << ", "
+                << SAMPLE_COUNT << ", "
+                << errStdDevPixel << ", "
+                << test3d.size() << ", "
+                << "Data" << ", ";
+
+            double minVal, maxVal, meanVal, var, bound;
+            GetStats( rotError, NUM_ITER, minVal, maxVal, meanVal, var, bound );
+            batchLog << "rotError" << ","
+                << minVal << ","
+                << maxVal << ","
+                << meanVal << ","
+                << var << ","
+                << bound << ",";
+
+            GetStats( transError, NUM_ITER, minVal, maxVal, meanVal, var,bound );
+            batchLog << "transError" << ","
+                << minVal << ","
+                << maxVal << ","
+                << meanVal << ","
+                << var << ","
+                << bound << ",";
+
+            GetStats( projError, NUM_ITER, minVal, maxVal, meanVal, var, bound );
+            batchLog << "projError" << ","
+                << minVal << ","
+                << maxVal << ","
+                << meanVal << ","
+                << var << ","
+                << bound << ",";
+
+            batchLog << endl;
+        }
+    }
+}
 
 int _tmain(int argc, _TCHAR* argv[])
 {
@@ -426,15 +556,12 @@ int _tmain(int argc, _TCHAR* argv[])
     cout << "projection matrix:" << endl
          << projection << endl;
 
-    vector<Point3f> calibPattern3d;
-    vector<Point2f> calibPattern2d;
-    vector<Point3f> test3d;
-    vector<Point2f> test2d;
 
-    std::ofstream cycleLog( "cycle.log.csv" );
-    std::ofstream batchLog( "batch.log.csv" );
+
+    //cycleLog.open( "cycle.log.csv" );
+    batchLog.open( "batch.log.csv" );
     {
-        cycleLog << "i, j, k, nSample, errStdDev, nPt, xx, errRot, errTrans, errProj" << endl;
+        //cycleLog << "i, j, k, nSample, errStdDev, nPt, xx, errRot, errTrans, errProj" << endl;
         batchLog << "i, j, k, nSample, errStdDev, nPt, xx"
             << ", _errRot_, errRot_min, errRot_max, errRot_mean, errRot_var, errRot_bound"
             << ", _errTrans_, errTrans_min, errTrans_max, errTrans_mean, errTrans_var, errTrans_bound"
@@ -442,106 +569,27 @@ int _tmain(int argc, _TCHAR* argv[])
             << endl;
     }
 
+    boost::thread_group threadPool;
+    boost::asio::io_service service;
+    std::auto_ptr<boost::asio::io_service::work> work( new boost::asio::io_service::work(service) );
+
+    for( int i = 0; i < 8; ++i )
+    {
+        threadPool.create_thread( 
+            boost::bind( &boost::asio::io_service::run, &service ) );
+    }
+
     for( int i = 2; i <= 10; ++i )
     for( int j = 2; j <= 10; ++j )
     for( int k = 1; k <= 10; ++k )
-    for( int SAMPLE_COUNT = 1; SAMPLE_COUNT <= 20; ++SAMPLE_COUNT )
-    for( int errStdDevPixel = 1; errStdDevPixel <= 25; ++errStdDevPixel )
     {
-        enum { NUM_ITER = 200 };
-        double rotError[NUM_ITER], transError[NUM_ITER], projError[NUM_ITER];
-        for( int ITER = 0; ITER < NUM_ITER; ++ITER )
-        {
-            ClearImage();
-            calibPattern3d.clear();
-            calibPattern2d.clear();
-            test3d.clear();
-            test2d.clear();
-    
-            MakeCalibPattern( i,j,k, fov_h, fov_v, calibPattern3d );
-            CameraToWorldCoord( extrinsic, calibPattern3d );
-
-            ProjectCalibPattern( projection, calibPattern3d, calibPattern2d );
-
-            for( int iMult = 0; iMult < SAMPLE_COUNT; ++iMult )
-            {
-                GenTestPoints( calibPattern3d, calibPattern2d, errStdDevPixel, test3d, test2d );
-            }
-
-            //cv::imwrite( "calibpts.png", s_img );
-            //cv::imshow( "2d pts", s_img );
-            //cv::waitKey();
-            //cv::destroyWindow("2d pts");
-
-            
-            Eval( intrinsic, extrinsic,
-                calibPattern3d, calibPattern2d,
-                test3d, test2d,
-                rotError[ITER], transError[ITER], projError[ITER] );
-
-            cycleLog
-                << i << ", "
-                << j << ", "
-                << k << ", "
-                << SAMPLE_COUNT << ", "
-                << errStdDevPixel << ", "
-                << test3d.size() << ", "
-                << "Data" << ", "
-                << rotError[ITER] << ", "
-                << transError[ITER] << ", "
-                << projError[ITER] << endl;
-            //cv::imwrite( "final.png", s_img );
-            //cv::imshow( "2d pts", s_img );
-            //cv::waitKey();
-            //cv::destroyWindow("2d pts");
-        }
-
-        cout
-            << i << ", "
-            << j << ", "
-            << k << ", "
-            << SAMPLE_COUNT << ", "
-            << errStdDevPixel << ", "
-            << test3d.size() << ", "
-            << "Done" << std::endl;
-
-        batchLog
-            << i << ", "
-            << j << ", "
-            << k << ", "
-            << SAMPLE_COUNT << ", "
-            << errStdDevPixel << ", "
-            << test3d.size() << ", "
-            << "Data" << ", ";
-
-        double minVal, maxVal, meanVal, var, bound;
-        GetStats( rotError, NUM_ITER, minVal, maxVal, meanVal, var, bound );
-        batchLog << "rotError" << ","
-            << minVal << ","
-            << maxVal << ","
-            << meanVal << ","
-            << var << ","
-            << bound << ",";
-
-        GetStats( transError, NUM_ITER, minVal, maxVal, meanVal, var,bound );
-        batchLog << "transError" << ","
-            << minVal << ","
-            << maxVal << ","
-            << meanVal << ","
-            << var << ","
-            << bound << ",";
-
-        GetStats( projError, NUM_ITER, minVal, maxVal, meanVal, var, bound );
-        batchLog << "projError" << ","
-            << minVal << ","
-            << maxVal << ","
-            << meanVal << ","
-            << var << ","
-            << bound << ",";
-
-        batchLog << endl;
+        service.post( boost::bind( &DoBatch, intrinsic, extrinsic, projection, i, j, k ) );
     }
 
-	return 0;
-}
+    cout << "Waiting for completion..." << endl;
+    work.reset();
+    threadPool.join_all( );
+    service.stop( );
 
+    return 0;
+}
